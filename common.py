@@ -8,9 +8,23 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-DATA_DIR = Path(__file__).parent / "data"
-FOOD_FILE = DATA_DIR / "식중독_지역월별.csv.gz"
-WEATHER_FILE = DATA_DIR / "서울_기상_월별.csv"
+ROOT = Path(__file__).parent
+
+
+def find_data_file(patterns, what):
+    """data 폴더 또는 앱 폴더(맨 위)에서 이름 패턴에 맞는 파일을 찾는다."""
+    for folder in (ROOT / "data", ROOT):
+        for pattern in patterns:
+            hits = sorted(folder.glob(pattern))
+            if hits:
+                return hits[0]
+    raise FileNotFoundError(
+        f"{what} 파일을 찾지 못했어요. 깃허브 맨 위(또는 data 폴더)에 올렸는지 확인해 주세요."
+    )
+
+
+FOOD_PATTERNS = ["식중독*.gz", "*2848*.gz"]
+WEATHER_PATTERNS = ["서울_기상*.csv", "OBS_ASOS_MNH*.csv"]
 
 APP_TITLE = "식중독 위험도 평가"
 LEVEL_NAMES = ["안전", "주의", "경고", "위험"]
@@ -47,7 +61,7 @@ TIPS_SOURCE = "출처: 식품의약품안전처 식중독 예방 6대 수칙 (�
 # ---------------- 데이터 ----------------
 @st.cache_data
 def load_food():
-    df = pd.read_csv(FOOD_FILE, encoding="utf-8-sig", dtype={"OCCRNC_MM": str})
+    df = pd.read_csv(find_data_file(FOOD_PATTERNS, "식중독 발생 통계"), encoding="utf-8-sig", dtype={"OCCRNC_MM": str})
     df = df.rename(
         columns={
             "OCCRNC_YEAR": "연",
@@ -100,7 +114,7 @@ def level_ranges(cuts):
 @st.cache_data
 def load_seoul():
     """서울 월별 기온·습도·강수량에 서울 월별 식중독(없는 달은 0건)을 붙인 표."""
-    w = pd.read_csv(WEATHER_FILE, encoding="cp949")
+    w = pd.read_csv(find_data_file(WEATHER_PATTERNS, "서울 월별 기상"), encoding="cp949")
     w = w[[_pick(w, "일시"), _pick(w, "평균기온("), _pick(w, "평균상대습도("), _pick(w, "월합강수량(")]]
     w.columns = ["연월", "평균기온", "평균습도", "강수량"]
     food = load_food()
