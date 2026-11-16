@@ -9,6 +9,7 @@ from common import (
     LEVEL_ICONS,
     LEVEL_NAMES,
     LEVEL_TIPS,
+    FEATURES,
     TIPS_SOURCE,
     fetch_today,
     get_final_model,
@@ -38,14 +39,26 @@ avg_count = float(national["발생 건수"].mean())
 # ---- 오늘 날씨 ----
 mode = st.radio("날씨 넣는 방법", ["자동으로 불러오기", "직접 입력"], horizontal=True)
 today = None
+fetch_error = None
 if mode == "자동으로 불러오기":
-    today = fetch_today()
+    try:
+        today = fetch_today()
+    except Exception as e:
+        fetch_error = str(e)
     if today is None:
         st.warning("날씨를 불러오지 못했어요. 아래 슬라이더로 직접 넣어 주세요.")
+        with st.expander("실패한 이유 보기"):
+            st.code(fetch_error or "알 수 없는 오류")
 
 if today is not None:
     temp, humid = today["전국"]["기온"], today["전국"]["습도"]
-    st.caption(f"전국 15개 지역 대표 지점의 현재 날씨 평균 (관측 시각 {today['시각']})")
+    if today["범위"] == "전국":
+        st.caption(f"전국 15개 지역 대표 지점의 현재 날씨 평균 (관측 시각 {today['시각']})")
+    else:
+        st.caption(
+            f"15개 지역 요청이 실패해서 서울 한 곳의 현재 날씨로 대신했어요 (관측 시각 {today['시각']}). "
+            "전국 평균과 다를 수 있어요."
+        )
 else:
     c1, c2 = st.columns(2)
     temp = c1.slider("전국 평균 기온(℃)", -15.0, 35.0, 20.0, 0.5)
@@ -70,20 +83,31 @@ st.write(
     f"(2002년 이후 한 달 평균은 {avg_count:.0f}건이에요.)"
 )
 
+# 막대 높이 = 그 단계의 예상 건수 상한 (위험은 과거 예상 건수의 최댓값)
+fitted_max = float(pd.Series(model.predict(national[FEATURES])).max())
+heights = [cuts[0], cuts[1], cuts[2], max(fitted_max, expected)]
 fig = go.Figure(
     go.Bar(
         x=LEVEL_NAMES,
-        y=[1, 1, 1, 1],
+        y=heights,
         marker_color=[LEVEL_COLORS[k] if k == level else "#d9d9d9" for k in range(4)],
         text=ranges,
         textposition="inside",
     )
 )
+fig.add_hline(
+    y=expected,
+    line_dash="dash",
+    line_color=LEVEL_COLORS[level],
+    annotation_text=f"오늘 예상 {expected:.0f}건",
+    annotation_position="top left",
+)
 fig.update_layout(
     title="위험 단계와 예상 건수의 범위",
-    yaxis=dict(visible=False),
+    yaxis_title="한 달 예상 발생 건수(건)",
+    yaxis_range=[0, max(heights) * 1.2],
     xaxis_title="위험 단계",
-    height=240,
+    height=360,
     showlegend=False,
 )
 st.plotly_chart(fig)
@@ -107,8 +131,12 @@ with st.expander("지역별 날씨와 발생 비중 (참고)"):
     share = (share / share.sum() * 100).round(1)
     table = pd.DataFrame({"과거 발생 비중(%)": share})
     if today is not None:
-        table["현재 기온(℃)"] = [round(today["지역"][r]["기온"], 1) for r in table.index]
-        table["현재 습도(%)"] = [round(today["지역"][r]["습도"]) for r in table.index]
+        table["현재 기온(℃)"] = [
+            round(today["지역"][r]["기온"], 1) if r in today["지역"] else None for r in table.index
+        ]
+        table["현재 습도(%)"] = [
+            round(today["지역"][r]["습도"]) if r in today["지역"] else None for r in table.index
+        ]
     st.dataframe(table.sort_values("과거 발생 비중(%)", ascending=False))
     st.caption(
         "위험 단계는 전국 기준이에요. 지역 하나만으로는 한 달 발생이 몇 건 안 돼서 날씨로 맞히기 어려웠어요. "
