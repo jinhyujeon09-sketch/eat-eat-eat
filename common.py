@@ -1,4 +1,5 @@
 import json
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -193,6 +194,32 @@ def predict_count(model, temp, humid):
     return float(model.predict(X)[0])
 
 
+def _region_X(region_col, temp, humid, regions):
+    X = pd.DataFrame({"평균기온": list(temp), "평균습도": list(humid)})
+    for r in regions:
+        X["지역_" + r] = [1.0 if x == r else 0.0 for x in region_col]
+    return X
+
+
+@st.cache_resource
+def get_region_model():
+    """지역별 모델: 지역마다 기본 발생 수준(지역 표시)과 기온·습도로 그 지역의 월 발생 건수를 맞힌다.
+    위험 단계는 그 지역의 과거 ‘예상 건수’ 순위로 정한다."""
+    p = load_panel()
+    regions = sorted(p["지역"].unique())
+    X = _region_X(p["지역"], p["평균기온"], p["평균습도"], regions)
+    model = make_count_model().fit(X, p["발생 건수"])
+    fitted = pd.Series(model.predict(X), index=p.index)
+    cuts = {r: level_cuts(fitted[p["지역"] == r]) for r in regions}
+    fmax = {r: float(fitted[p["지역"] == r].max()) for r in regions}
+    mean_count = {r: float(p.loc[p["지역"] == r, "발생 건수"].mean()) for r in regions}
+    return model, regions, cuts, fmax, mean_count
+
+
+def predict_region(model, regions, region, temp, humid):
+    return float(model.predict(_region_X([region], [temp], [humid], regions))[0])
+
+
 @st.cache_data
 def get_pred_cuts():
     """앱이 위험 단계를 정할 때 쓰는 경계: 과거 모든 달의 ‘예상 건수’의 하위 25%·50%·75% 값."""
@@ -201,8 +228,8 @@ def get_pred_cuts():
     return level_cuts(fitted)
 
 
-def pred_ranges(cuts):
-    c = [round(x) for x in cuts]
+def pred_ranges(cuts, digits=0):
+    c = [f"{x:.{digits}f}" for x in cuts]
     return [f"{c[0]}건 이하", f"{c[0]}~{c[1]}건", f"{c[1]}~{c[2]}건", f"{c[2]}건 초과"]
 
 
@@ -244,39 +271,61 @@ def rolling_eval():
 
 
 # ---------------- 오늘 날씨 ----------------
-@st.cache_data(ttl=600)
-def fetch_today():
-    """15개 지역 대표 지점의 현재 기온·습도를 불러와 지역별·전국 평균을 만든다. 실패하면 None."""
-    points = [(r, lat, lon) for r, ps in LIVE_POINTS.items() for lat, lon in ps]
+def _fetch(points_by_region, scope):
+    """지점들의 현재 기온·습도를 한 번에 불러와 지역별·전국 평균을 만든다."""
+    points = [(r, lat, lon) for r, ps in points_by_region.items() for lat, lon in ps]
+    zones = urllib.parse.quote(",".join(["Asia/Seoul"] * len(points)), safe="")
     url = (
         "https://api.open-meteo.com/v1/forecast?latitude="
         + ",".join(str(lat) for _, lat, _ in points)
         + "&longitude="
         + ",".join(str(lon) for _, _, lon in points)
-        + "&current=temperature_2m,relative_humidity_2m&timezone=Asia%2FSeoul"
+        + "&current=temperature_2m,relative_humidity_2m&timezone="
+        + zones
     )
+    req = urllib.request.Request(url, headers={"User-Agent": "food-risk-app/1.0"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        data = json.loads(r.read().decode("utf-8"))
+    if isinstance(data, dict):
+        data = [data]
+    if len(data) != len(points):
+        raise ValueError(f"응답 지점 수가 달라요 ({len(data)}개, 기대 {len(points)}개)")
+    per = {}
+    for (region, _, _), d in zip(points, data):
+        cur = d["current"]
+        per.setdefault(region, []).append(
+            (float(cur["temperature_2m"]), float(cur["relative_humidity_2m"]))
+        )
+    regions = {
+        region: {
+            "기온": sum(v[0] for v in vals) / len(vals),
+            "습도": sum(v[1] for v in vals) / len(vals),
+        }
+        for region, vals in per.items()
+    }
+    national = {
+        "기온": sum(v["기온"] for v in regions.values()) / len(regions),
+        "습도": sum(v["습도"] for v in regions.values()) / len(regions),
+    }
+    return {
+        "전국": national,
+        "지역": regions,
+        "시각": str(data[0]["current"].get("time", "")),
+        "범위": scope,
+    }
+
+
+@st.cache_data(ttl=600)
+def fetch_today():
+    """15개 지역 대표 지점의 현재 날씨. 실패하면 서울 한 곳으로 대신하고,
+    그것도 실패하면 이유를 담은 오류를 낸다. (오류는 저장되지 않아 다음에 다시 시도한다.)"""
+    errors = []
     try:
-        with urllib.request.urlopen(url, timeout=8) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        if isinstance(data, dict):
-            data = [data]
-        if len(data) != len(points):
-            return None
-        per = {}
-        for (region, _, _), d in zip(points, data):
-            cur = d["current"]
-            per.setdefault(region, []).append((float(cur["temperature_2m"]), float(cur["relative_humidity_2m"])))
-        regions = {
-            region: {
-                "기온": sum(v[0] for v in vals) / len(vals),
-                "습도": sum(v[1] for v in vals) / len(vals),
-            }
-            for region, vals in per.items()
-        }
-        national = {
-            "기온": sum(v["기온"] for v in regions.values()) / len(regions),
-            "습도": sum(v["습도"] for v in regions.values()) / len(regions),
-        }
-        return {"전국": national, "지역": regions, "시각": str(data[0]["current"].get("time", ""))}
-    except Exception:
-        return None
+        return _fetch(LIVE_POINTS, "전국")
+    except Exception as e:
+        errors.append(f"15개 지역 요청 실패 - {type(e).__name__}: {e}")
+    try:
+        return _fetch({"서울": LIVE_POINTS["서울"]}, "서울")
+    except Exception as e:
+        errors.append(f"서울 요청도 실패 - {type(e).__name__}: {e}")
+    raise RuntimeError("\n".join(errors))
