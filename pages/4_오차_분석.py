@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 from common import APP_TITLE, FIRST_TEST_YEAR, load_national, load_panel, rolling_eval
@@ -44,25 +45,52 @@ for col, label, value in [
         with st.container(border=True):
             st.metric(label, f"{value:.1f}건")
 
-# ---------------- 2. 연도별 쏠림 ----------------
-st.subheader("해마다 예상보다 많았나, 적었나")
+# ---------------- 2. 실제와 예상, 그리고 해마다의 쏠림 ----------------
+st.subheader("실제와 예상, 해마다 얼마나 어긋났나")
 by_year = res.groupby("연", as_index=False)["오차"].mean()
-fig = go.Figure(
+res["날짜"] = pd.to_datetime(res["연월"] + "-01")
+by_year["날짜"] = pd.to_datetime(by_year["연"].astype(str) + "-07-01")  # 막대를 그 해 한가운데에 놓는다
+
+fig = make_subplots(
+    rows=2,
+    cols=1,
+    shared_xaxes=True,
+    vertical_spacing=0.1,
+    row_heights=[0.6, 0.4],
+    subplot_titles=("전국 월 발생 건수: 실제와 예상", "해마다 평균 오차 (실제 − 예상)"),
+)
+fig.add_trace(
+    go.Scatter(x=res["날짜"], y=res["실제"], mode="lines", name="실제 건수", line=dict(width=2)),
+    row=1, col=1,
+)
+fig.add_trace(
+    go.Scatter(x=res["날짜"], y=res["날씨 모델"], mode="lines", name="날씨 모델 예상", line=dict(width=2, dash="dot")),
+    row=1, col=1,
+)
+fig.add_trace(
     go.Bar(
-        x=by_year["연"],
+        x=by_year["날짜"],
         y=by_year["오차"],
+        width=[270 * 24 * 60 * 60 * 1000] * len(by_year),  # 약 9개월 폭 (밀리초)
         marker_color=["#d62728" if v > 0 else "#4c78a8" for v in by_year["오차"]],
         text=[f"{v:+.1f}" for v in by_year["오차"]],
         textposition="outside",
-    )
+        name="해마다 평균 오차",
+        showlegend=False,
+    ),
+    row=2, col=1,
 )
-fig.update_layout(xaxis_title="연도", yaxis_title="평균 오차(건/월)", height=360)
-fig.update_xaxes(dtick=1)
+fig.add_hline(y=0, line_color="gray", line_width=1, row=2, col=1)
+fig.update_yaxes(title_text="월 발생 건수(건)", row=1, col=1)
+fig.update_yaxes(title_text="평균 오차(건/월)", row=2, col=1)
+fig.update_xaxes(tickformat="%Y", dtick="M12", title_text="연도", row=2, col=1)
+fig.update_layout(height=720, legend=dict(orientation="h", y=1.1, x=0))
 st.plotly_chart(fig)
-y26 = by_year[by_year["연"] == by_year["연"].max()]
-if not y26.empty:
+st.caption("위아래 그래프의 가로축(연도)이 같아서, 위에서 실제 건수가 예상보다 훨씬 높은 때와 아래 막대가 크게 솟은 해가 위아래로 맞아요.")
+y_last = by_year[by_year["연"] == by_year["연"].max()]
+if not y_last.empty:
     st.write(
-        f"가장 최근 해({int(y26['연'].iloc[0])}년)는 한 달에 평균 {float(y26['오차'].iloc[0]):+.1f}건 어긋났어요. "
+        f"가장 최근 해({int(y_last['연'].iloc[0])}년)는 한 달에 평균 {float(y_last['오차'].iloc[0]):+.1f}건 어긋났어요. "
         "빨간 막대는 예상보다 많이 발생한 해, 파란 막대는 적게 발생한 해예요."
     )
 
